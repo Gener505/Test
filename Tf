@@ -1,4 +1,3 @@
-# Load required assemblies explicitly so namespaces like System.Windows.Forms and System.Net.Http are available
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Net.Http
 
